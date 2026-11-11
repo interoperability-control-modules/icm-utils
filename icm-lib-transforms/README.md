@@ -58,10 +58,10 @@ holding one is too easy to misread.
 | Arithmetic | `scale`, `scale_int`, `scale_decimal_int_signed`, `multiple`, `add`, `subtract`, `divide`, `negate`, `absolute`, `power`, `root`, `log`, `modulo`, `no_op`, `mod10k`, `mod10k64`, `mod10k48` |
 | Rounding | `round`, `floor`, `ceil`, `clamp` |
 | With another register | `scale_reg`, `scale_reg_pow_10`, `sunssf`, `add_reg`, `subtract_reg`, `multiply_reg`, `divide_reg` |
-| Over several registers | `sum_of`, `mean_of`, `min_of`, `max_of`, `all_equal_of`, `all_of`, `any_of`; arguments `literal(...)`, `reg_name(...)` |
+| Over several registers | `value_of`, `sum_of`, `mean_of`, `min_of`, `max_of`, `all_equal_of`, `all_of`, `any_of`; arguments `literal(...)`, `reg_name(...)` |
 | Comparison | `equals` (`eq`), `not_equals` (`ne`), `less_than` (`lt`), `less_or_equal` (`le`), `greater_than` (`gt`), `greater_or_equal` (`ge`), `in_range`, `select`, `map` |
 | Bits and booleans | `bit`, `bits`, `mask`, `shift`, `invert`, `bool`, `not` |
-| Type and value | `cast_value`, `const`, `param`, `uuid4`, `timestamp`, `approx` |
+| Type and value | `cast_value`, `const`, `param`, `uuid4`, `timestamp`, `approx`, `invalid` (device sentinels such as `-32768` or `0xFFFF` yield no value), `finite` (NaN and infinities yield no value) |
 | Time | `whole_seconds`, `nanoseconds`, `from_clearing_time` |
 | Lists and structure | `take`, `mean`, `count`, `when`, `when_equal`, `device_values`, `pairs`, `unpairs`, `series`, `unseries`, `as_list`, `immediate`, `scale_fields`, `prefix_keys` |
 

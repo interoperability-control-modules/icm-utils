@@ -151,8 +151,13 @@ def scale_decimal_int_signed(multiplier):
         Scale float value that is stored as a decimal number, not using standard signing rollover,
          as the PM800 Power Factor Registers.
     """
-    conv = c.if_(c.this < 0, multiplier * (0 - (c.this +32768)), multiplier * c.this)
-    conv.inverse = c.if_(c.this < 0, (0 - (c.this / float(multiplier))) - 0xFFFF, (c.this / float(multiplier)))
+    multiplier = _numeric(multiplier)
+    # A negative register holds -(magnitude) - 32768: the magnitude is -(raw + 32768), then scaled. Conversions define
+    # the arithmetic operators but not their reflected forms, so the conversion goes on the left.
+    conv = c.if_(c.this < 0, (c.naive(0) - (c.this + 32768)) * multiplier, c.this * multiplier)
+    # The inverse undoes exactly that: -(value / multiplier) - 32768 for a negative value. modbus_tk's inverse used
+    # 0xFFFF here and never round-tripped (it also referred to an undefined name, so it never ran).
+    conv.inverse = c.if_(c.this < 0, (c.naive(0) - (c.this / float(multiplier))) - 32768, c.this / float(multiplier))
     return conv
 
 def _numeric(arg):
@@ -349,6 +354,20 @@ def _over(reducer, args):
     return conv
 
 
+def _value_of(values):
+    present = _present(values)
+    return present[0] if present else MISSING
+
+
+def value_of(register):
+    """The value of one other register, as the start of a derived point's chain: ``transform(value_of(Status), bit(3))``
+    publishes bit 3 of ``Status`` as a point of its own, without a second register at the same address. MISSING while
+    the register has no value. Defines a derived point: the point's own value is not used."""
+    if isinstance(register, (int, float, bool)) or isinstance(register, _Literal):
+        raise ValueError('value_of() takes the name of a register, not a literal value.')
+    return _over(_value_of, (register,))
+
+
 def sum_of(*args):
     """The sum of the named registers (and any literal numbers): ``sum_of(phase_a, phase_b, phase_c)``. Registers
     without a value are left out; MISSING when none has one. Defines a derived point: the point's own value is not used."""
@@ -389,6 +408,45 @@ def any_of(*args):
 def no_op():
     """Copy the value unchanged (modbus_tk ``no_op``); its own inverse."""
     conv = c.this.pipe(c.this)
+    conv.inverse = c.this.pipe(c.this)
+    return conv
+
+
+def _sentinel(arg):
+    """A sentinel as written in a registry: a number, a hexadecimal such as ``0x8000``, or any other text as is."""
+    if isinstance(arg, (int, float)) and not isinstance(arg, bool):
+        return arg
+    text = str(arg).strip()
+    try:
+        return int(text, 0)
+    except ValueError:
+        try:
+            return float(text)
+        except ValueError:
+            return text
+
+
+def invalid(*values):
+    """
+        No value when the raw value is one of ``values``: a device's "not implemented" or error sentinel, such as
+         SunSpec's ``invalid(-32768)`` for an int16 and ``invalid(65535)`` for a uint16 (``0x8000`` and ``0xFFFF`` are
+         accepted spellings). Any other value passes through, and so does a write: the inverse is the identity. First in
+         a chain, it keeps a sentinel from being scaled into a number: ``transform(invalid(-32768), sunssf(W_SF))``.
+    """
+    if not values:
+        raise ValueError('invalid() needs at least one sentinel value.')
+    sentinels = tuple(_sentinel(v) for v in values)
+    conv = c.call_func(lambda v: MISSING if v is None or v in sentinels else v, c.this)
+    conv.inverse = c.this.pipe(c.this)
+    return conv
+
+
+def finite():
+    """
+        No value when the raw value is NaN or infinite (SunSpec's float32 "not implemented" is NaN); other values pass
+         through, and so does a write.
+    """
+    conv = c.call_func(lambda v: MISSING if v is None or (isinstance(v, float) and not math.isfinite(v)) else v, c.this)
     conv.inverse = c.this.pipe(c.this)
     return conv
 

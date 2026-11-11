@@ -142,6 +142,7 @@ _BUILTIN_METADATA: dict[str, tuple[float | None, type | None, tuple[str, ...]]] 
     'multiple': (1.0, None, ()), 'add': (1.0, None, ()), 'subtract': (1.0, None, ()), 'divide': (1.0, float, ()),
     'negate': (1.0, None, ()), 'absolute': (0.9, None, ()), 'power': (1.0, None, ()), 'root': (1.0, float, ()),
     'log': (1.0, float, ()), 'modulo': (0.5, None, ()), 'no_op': (1.0, None, ()),
+    'invalid': (1.0, None, ()), 'finite': (1.0, None, ()),
     'scale_reg': (1.0, float, ()), 'scale_reg_pow_10': (1.0, float, ()), 'sunssf': (1.0, float, ()),
     'add_reg': (1.0, None, ()), 'subtract_reg': (1.0, None, ()), 'multiply_reg': (1.0, None, ()), 'divide_reg': (1.0, float, ()),
     'mod10k': (1.0, int, ()), 'mod10k64': (1.0, int, ()), 'mod10k48': (1.0, int, ()),
@@ -155,7 +156,7 @@ _BUILTIN_METADATA: dict[str, tuple[float | None, type | None, tuple[str, ...]]] 
     'less_or_equal': (0.9, bool, ('le',)), 'greater_than': (0.9, bool, ('gt',)), 'greater_or_equal': (0.9, bool, ('ge',)),
     'in_range': (0.9, bool, ()), 'select': (1.0, None, ()), 'map': (1.0, None, ()),
     # over several registers (the point's own value is not carried)
-    'sum_of': (0.0, None, ()), 'mean_of': (0.0, float, ()), 'min_of': (0.0, None, ()), 'max_of': (0.0, None, ()),
+    'value_of': (0.0, None, ()), 'sum_of': (0.0, None, ()), 'mean_of': (0.0, float, ()), 'min_of': (0.0, None, ()), 'max_of': (0.0, None, ()),
     'all_equal_of': (0.0, bool, ()), 'all_of': (0.0, bool, ()), 'any_of': (0.0, bool, ()),
     # type and value
     'cast_value': (0.9, None, ()), 'const': (0.0, None, ()), 'param': (0.0, None, ()), 'uuid4': (0.0, str, ()),

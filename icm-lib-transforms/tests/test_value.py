@@ -167,3 +167,45 @@ def test_compiled_transforms_are_cached_by_text_and_options():
 def test_parameters_bind_at_compile_time():
     t = compile_value_transform("param('mrid')", context={'mrid': 'abc'})
     assert t.forward(0) == 'abc' and t.fidelity == 0.0
+
+
+def test_defines_value_marks_register_only_chains():
+    assert compile_value_transform('sum_of(a, b)').defines_value
+    assert compile_value_transform('transform(mean_of(a, b), scale(0.1))').defines_value
+    assert not compile_value_transform('scale_reg(a)').defines_value
+    assert not compile_value_transform('transform(scale(0.1), sum_of(a))').defines_value
+    assert not compile_value_transform('').defines_value
+
+
+def test_scale_decimal_int_signed_matches_modbus_tk():
+    t = compile_value_transform('scale_decimal_int_signed(0.001)')
+    assert t.forward(1500) == 1.5 and t.forward(-1500) == pytest.approx(0.001 * (0 - (-1500 + 32768)))
+    assert t.forward(-32668) == pytest.approx(-0.1)                    # a small negative is stored near -32768
+    assert t.inverse(1.5) == 1500.0
+    for raw in (-32668, -1500, -1):                                   # the inverse undoes the encoding exactly
+        assert t.inverse(t.forward(raw)) == pytest.approx(raw)
+    assert compile_value_transform("scale_decimal_int_signed('0.01')").forward(250) == 2.5
+
+
+def test_invalid_and_finite_hold_sentinels_out_and_pass_writes_through():
+    t = compile_value_transform('invalid(-32768)')
+    assert t.forward(-32768) is MISSING and t.forward(1234) == 1234 and t.inverse(1234) == 1234 and t.invertible
+    assert compile_value_transform('invalid(0xFFFF, 0xFFFE)').forward(65535) is MISSING
+    assert compile_value_transform("invalid('N/A')").forward('N/A') is MISSING
+    chain = compile_value_transform('transform(invalid(-32768), sunssf(W_SF))')
+    assert chain.forward(-32768, {'W_SF': -1}) is MISSING and chain.forward(1234, {'W_SF': -1}) == 123.4
+    assert chain.inverse(123.4, {'W_SF': -1}) == 1234.0 and chain.result_type is float
+    f = compile_value_transform('finite()')
+    assert f.forward(float('nan')) is MISSING and f.forward(float('inf')) is MISSING and f.forward(2.5) == 2.5
+    with pytest.raises(ValueError):
+        compile_value_transform('invalid()')
+
+
+def test_value_of_defines_a_derived_point_from_one_register():
+    t = compile_value_transform('transform(value_of(Status), bit(3))')
+    assert t.defines_value and t.references == frozenset({'Status'}) and not t.invertible
+    assert t.forward(None, {'Status': 0b1000}) is True and t.forward(None, {'Status': 0b0111}) is False
+    assert t.forward(None, {'Status': None}) is MISSING
+    assert compile_value_transform('value_of(W)').forward(None, {'W': 42}) == 42
+    with pytest.raises(ValueError, match='name of a register'):
+        compile_value_transform('value_of(3)')

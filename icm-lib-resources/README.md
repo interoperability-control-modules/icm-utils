@@ -20,6 +20,18 @@ resource = ResourceData.lookup(agent, 'site/inverter/ess')     # resolved throug
 resource.subscribe(lambda peer, sender, bus, topic, headers, message: ...)
 ```
 
+A resource may also come from the agent's own configuration, with no service involved (`icm.resources.definitions`):
+a `LocalCanonical` names where a device publishes and in which format, a `LocalAlias` adds the chain (the same stage
+list the service's mapping files hold) and the codec. `ResourceData.from_definition(agent, topic, definition)` builds the
+same object `lookup` does; `origin` says which constructor made it, and `reload()` re-resolves or re-reads and recompiles,
+moving an active subscription when the publication topics change.
+
+`subscribe` takes an optional `DeliveryPolicy` saying when a message is wanted out of several arrivals: `each` (every
+arrival, the default), `complete` (once every field the chain reads has arrived, or after `max_wait`), `merge` (every
+arrival merged over the last known values, `stale_after` dropping old ones), `interval` (every N seconds from the last
+known values) or `trigger` (when a named field changes). The `Assembler` behind it is pure and clock-driven, and each
+delivery's headers carry what was fresh, merged or missing (`icm-assembly`) and the definition's origin (`icm-origin`).
+
 ## Extras
 
 - `openfmb`: the protobuf runtime, for encoding and decoding OpenFMB profiles.

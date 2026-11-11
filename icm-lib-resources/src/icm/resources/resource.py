@@ -8,6 +8,8 @@ from typing import Any, Callable, Iterable
 from .codecs import decoder_for, encoder_for
 from icm.transforms.parser import TransformParser
 
+from .definitions import DeliveryPolicy, LocalAlias, LocalCanonical, parse_definition
+
 try:
     from volttron.utils.jsonrpc import RemoteError
 except ImportError:  # pragma: no cover - the parser and models are usable without a VOLTTRON client.
@@ -108,44 +110,55 @@ class AliasedResource(Resource):
     references: tuple
 
 class ResourceData:
-    def __init__(self, agent, local_topic, resource_def):
+    """A resource as one consumer sees it: the canonical publications it subscribes to, the chain that turns them
+    into the wanted format and the codec that puts them on the wire.
+
+    Two constructors: :meth:`lookup` resolves a UAI through the presentation service, :meth:`from_definition` takes a
+    definition from the agent's own configuration. Both produce the same object; ``origin`` says which
+    (``'resolved'`` or ``'local'``). :meth:`reload` re-resolves or re-reads and recompiles. :meth:`subscribe` takes an
+    optional :class:`~icm.resources.definitions.DeliveryPolicy`; without one every arrival is delivered as it comes.
+    """
+    SERVICE = 'platform.presentation'
+    ASSEMBLY_HEADER = 'icm-assembly'
+    ORIGIN_HEADER = 'icm-origin'
+
+    def __init__(self, agent, local_topic, resource_def, *, origin: str = 'resolved', definition=None, lookup_args: tuple | None = None):
         self.agent = agent
         self.local_topic = local_topic
+        self.origin = origin
+        self.definition = definition
+        self._lookup_args = lookup_args
+        self._callback = None
+        self._policy: DeliveryPolicy | None = None
+        self._assembler = None
+        self._subscriptions: list[tuple[str, Callable]] = []
+        self._ticker = None
+        self._compile(resource_def)
+
+    def _compile(self, resource_def: dict) -> None:
+        """Freeze a resolved dict into the chain, the codec and the field set the chain reads."""
         self.resource_def = resource_def
         # No 'transform' (resolved without a target format) or an empty chain means the resource is already
         # in the wanted format; both compile to the identity. The resource's parameters bind param() expressions.
         parser = TransformParser(context=self.resource_def.get('parameters') or {})
-        self.transform = parser.build_transform_from_schema(self.resource_def.get('transform') or [])
+        chain = self.resource_def.get('transform') or []
+        self.transform = parser.build_transform_from_schema(chain)
+        write_chain = self.resource_def.get('write_transform')
+        self.write_transform = parser.build_transform_from_schema(write_chain) if write_chain is not None else None
+        # The fields the chain reads, as a device publishes them: the first segment of each source path.
+        self.required_fields: frozenset[str] = frozenset(str(src[0]) for src in parser.field_map(chain).sources()
+                                                        if src and str(src[0]) != '#') if chain else frozenset()
         # The wire codec of the target format (``codec`` from resolve): identity for JSON, else e.g. protobuf.
         codec = self.resource_def.get('codec')
         self.encode: Callable[[Any], Any] = encoder_for(codec)
         self.decode: Callable[[Any], Any] = decoder_for(codec)
-        # TODO: One step further, make actual Resource (or include all this in Resource?).
-        #   This version, however, does not contain all the fields of canonical nor aliased resources.
-        # self.resource = Resource(**resource_def)
 
-    def subscribe(self, callback: Callable):
-        """Subscribe to the canonical resource's publications and hand ``callback`` each one, transformed and encoded:
-        the device's ``.../all`` polls and, for a served device, the ``.../multi`` pushes its peer's writes arrive on."""
-        def handle_incoming(peer, sender, bus, topic, headers, message):
-            _log.debug(f'@@@@@ CANONICAL MESSAGE ({topic}): {message}')
-            transformed_payload = self.encode(self.transform.execute(message))
-            callback(peer, sender, bus, self.local_topic, headers, transformed_payload)
-        results = [self.agent.vip.pubsub.subscribe(peer='pubsub', prefix=topic, callback=handle_incoming).get()
-                   for topic in self.publication_topics()]
-        return results[0] if results else None
-
-    def publication_topics(self) -> list[str]:
-        """The topics a canonical resource's values arrive on: its publication topic and, when that is a device's
-        ``/all`` topic, the device's ``/multi`` topic too (pushed values are published there)."""
-        return publication_topics(self.resource_def['publication_topic'])
-
+    # ---- constructors -----------------------------------------------------------------------------------------------
     @classmethod
     def lookup(cls, agent, local_topic: tuple | list | str, delimiter='/', strict: bool = False):
         """The resource behind ``local_topic``, resolved through the presentation service. ``strict`` requires the
         UAI to name a resource exactly; without it the service falls back to the longest registered prefix, which
         suits point-level lookups but not deciding where a message that arrived on a topic belongs."""
-        # Find the resource to subscribe:
         if isinstance(local_topic, list):
             uai = tuple(local_topic)
         elif isinstance(local_topic, str):
@@ -155,8 +168,15 @@ class ResourceData:
             return None
         else:
             uai = local_topic
+        resource_def = cls._resolve(agent, uai, strict, local_topic)
+        if resource_def is None:
+            return None
+        return cls(agent, local_topic, resource_def, origin='resolved', lookup_args=(uai, strict)) if resource_def else None
+
+    @classmethod
+    def _resolve(cls, agent, uai, strict: bool, local_topic) -> dict | None:
         try:
-            resource_def = agent.vip.rpc.call('platform.presentation', 'resolve', uai, strict=strict).get()
+            resource_def = agent.vip.rpc.call(cls.SERVICE, 'resolve', uai, strict=strict).get()
         except RemoteError as e:
             if not _is_transform_not_found(e):
                 raise
@@ -165,7 +185,107 @@ class ResourceData:
             _log.warning(f'Resource {local_topic} cannot be provided in the requested format: {e.message}')
             return None
         _log.debug(f'@@@@@@@@ RESOURCE DEF: {resource_def}')
-        return cls(agent, local_topic, resource_def) if resource_def else None
+        return resource_def
+
+    @classmethod
+    def from_definition(cls, agent, local_topic, definition: dict | LocalCanonical | LocalAlias):
+        """A resource from the agent's own configuration (a :class:`LocalCanonical` or :class:`LocalAlias`, or the
+        dict form of one): no service is involved, the chain is run as declared, and the UAI must match exactly."""
+        parsed = parse_definition(definition)
+        return cls(agent, local_topic, parsed.as_resolved(), origin='local', definition=parsed)
+
+    def reload(self, definition: dict | LocalCanonical | LocalAlias | None = None) -> bool:
+        """Re-resolve (a resolved resource) or re-read the definition (a local one; a new ``definition`` replaces the
+        old) and recompile. An active subscription follows: when the publication topics changed it is moved.
+        Returns False when a resolved resource no longer resolves; the old chain then stays in force."""
+        if self.origin == 'local':
+            if definition is not None:
+                self.definition = parse_definition(definition)
+            resource_def = self.definition.as_resolved()
+        else:
+            if definition is not None:
+                raise ValueError('a resolved resource reloads from the service; a definition belongs to from_definition.')
+            uai, strict = self._lookup_args
+            resource_def = self._resolve(self.agent, uai, strict, self.local_topic)
+            if not resource_def:
+                return False
+        before = self.publication_topics()
+        self._compile(resource_def)
+        if self._callback is not None and self.publication_topics() != before:
+            callback, policy = self._callback, self._policy
+            self.unsubscribe()
+            self.subscribe(callback, policy)
+        elif self._assembler is not None:
+            self._assembler.required = self.required_fields
+        return True
+
+    # ---- subscription -----------------------------------------------------------------------------------------------
+    def publication_topics(self) -> list[str]:
+        """The topics a canonical resource's values arrive on: its publication topic and, when that is a device's
+        ``/all`` topic, the device's ``/multi`` topic too (pushed values are published there); for a composed
+        resource, every declared publication topic."""
+        declared = self.resource_def.get('publication_topics')
+        if declared:
+            topics: list[str] = []
+            for topic in declared:
+                topics += [t for t in publication_topics(topic) if t not in topics]
+            return topics
+        return publication_topics(self.resource_def['publication_topic'])
+
+    def subscribe(self, callback: Callable, policy: DeliveryPolicy | dict | None = None):
+        """Subscribe to the canonical resource's publications and hand ``callback`` each delivery, transformed and
+        encoded, under this resource's local topic. Without ``policy`` every publication is delivered as it arrives;
+        with one, the :class:`~icm.resources.assembler.Assembler` decides when and with which fields, and the headers
+        carry the assembly record (``icm-assembly``) and the definition's origin (``icm-origin``)."""
+        from .assembler import Assembler, Ticker
+        self._callback = callback
+        self._policy = DeliveryPolicy(**policy) if isinstance(policy, dict) else policy
+        self._assembler = Assembler(self._policy, self.required_fields) if self._policy and self._policy.kind != 'each' else None
+
+        def deliver(peer, sender, bus, headers, payload, emit=None):
+            if emit is not None:
+                headers = {**(headers or {}), self.ASSEMBLY_HEADER: emit.as_header(), self.ORIGIN_HEADER: self.origin}
+            callback(peer, sender, bus, self.local_topic, headers, self.encode(self.transform.execute(payload)))
+
+        def handle_incoming(peer, sender, bus, topic, headers, message):
+            _log.debug(f'@@@@@ CANONICAL MESSAGE ({topic}): {message}')
+            if self._assembler is None:
+                deliver(peer, sender, bus, headers, message)
+                return
+            emit = self._assembler.offer(message)
+            if emit is not None:
+                deliver(peer, sender, bus, headers, emit.values, emit)
+            self._arm_ticker(lambda e: deliver(peer, sender, bus, headers, e.values, e))
+
+        results = []
+        for topic in self.publication_topics():
+            results.append(self.agent.vip.pubsub.subscribe(peer='pubsub', prefix=topic, callback=handle_incoming).get())
+            self._subscriptions.append((topic, handle_incoming))
+        if self._assembler is not None and self._policy.kind == 'interval':
+            self._arm_ticker(lambda e: deliver('pubsub', None, None, {}, e.values, e))
+        return results[0] if results else None
+
+    def unsubscribe(self) -> None:
+        """Drop the subscriptions and any pending timer."""
+        for topic, handler in self._subscriptions:
+            try:
+                self.agent.vip.pubsub.unsubscribe(peer='pubsub', prefix=topic, callback=handler)
+            except Exception as e:                     # the bus may already be gone
+                _log.debug(f'unsubscribe {topic}: {e}')
+        self._subscriptions.clear()
+        if self._ticker is not None:
+            self._ticker.cancel()
+            self._ticker = None
+        self._callback = None
+
+    def _arm_ticker(self, on_due: Callable) -> None:
+        """Run ``due`` when the assembler says the clock matters (a ``max_wait`` or an ``interval``)."""
+        from .assembler import Ticker
+        assembler = self._assembler
+        if assembler is None or assembler.next_due() is None or self._ticker is not None:
+            return
+        self._ticker = Ticker(assembler, on_due)
+        self._ticker.start()
 
 
 class ResourceWriter:

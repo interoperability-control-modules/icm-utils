@@ -48,6 +48,8 @@ class ValueTransform:
     non_invertible: tuple[str, ...]       #: the functions in the chain that have no inverse, in order
     _forward: Callable[[dict], Any]
     _inverse: Callable[[dict], Any] | None
+    defines_value: bool = False           #: the chain starts with a function over several registers (``sum_of`` ...):
+                                          #: it defines the value from them and the point's own value is not an input
 
     @property
     def invertible(self) -> bool:
@@ -102,7 +104,9 @@ def _compile(text: str, missing_reference: str, context_items: tuple) -> ValueTr
     non_invertible = tuple(name for name, inv in zip(names, inverses) if inv is None)
     forward = _pipeline(convs)
     inverse = _pipeline(list(reversed(inverses))) if not non_invertible else None
-    return ValueTransform(text, names, references, result_type, fidelity, missing_reference, non_invertible, forward, inverse)
+    defines_value = bool(convs) and bool(getattr(convs[0], 'defines_value', False))
+    return ValueTransform(text, names, references, result_type, fidelity, missing_reference, non_invertible, forward, inverse,
+                          defines_value=defines_value)
 
 
 def _parse(parser: TransformParser, text: str) -> _Expr:
